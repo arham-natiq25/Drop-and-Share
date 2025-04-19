@@ -17,7 +17,7 @@ node_modules/
 jspm_packages/
 
 # Vite build output
-# dist/
+dist/
 build/
 
 # Local env files

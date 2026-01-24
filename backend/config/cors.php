@@ -19,7 +19,7 @@ return [
 
     'allowed_methods' => ['*'],
 
-    'allowed_origins' => ['http://localhost:5174','https://dropnshare.arhamnatiq.com/'],
+    'allowed_origins' => ['http://localhost:5174','https://dropnshare.arhamnatiq.com'],
 
     'allowed_origins_patterns' => [],
 

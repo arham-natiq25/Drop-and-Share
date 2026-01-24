@@ -2,10 +2,10 @@
 
 namespace App\Http\Controllers\File;
 
+use App\Models\Upload;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use ZipArchive;
 
@@ -16,47 +16,6 @@ class FileController extends Controller
     
     // Maximum total upload size in bytes (500MB)
     private const MAX_TOTAL_SIZE = 500 * 1024 * 1024;
-    
-    // Allowed file types
-    private const ALLOWED_MIME_TYPES = [
-        // Images
-        'image/jpeg',
-        'image/png',
-        'image/gif',
-        'image/webp',
-        'image/svg+xml',
-        
-        // Documents
-        'application/pdf',
-        'application/msword',
-        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-        'application/vnd.ms-excel',
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        'application/vnd.ms-powerpoint',
-        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-        'text/plain',
-        
-        // Archives
-        'application/zip',
-        'application/x-rar-compressed',
-        'application/x-7z-compressed',
-        'application/x-tar',
-        'application/gzip',
-        
-        // Audio/Video
-        'audio/mpeg',
-        'audio/wav',
-        'video/mp4',
-        'video/webm',
-        'video/quicktime',
-        
-        // Code
-        'text/html',
-        'text/css',
-        'text/javascript',
-        'application/json',
-        'application/xml',
-    ];
 
     public function upload(Request $request)
     {
@@ -66,16 +25,47 @@ class FileController extends Controller
         }
     
         $files = $request->file('files');
+        $files = is_array($files) ? $files : [$files];
+
+        // Optional auth (if bearer token is provided)
+        $user = auth('sanctum')->user();
+        $ip = $request->ip();
+
+        // Daily limits:
+        // - Guests: 3 files/day per IP
+        // - Signed in: 5 files/day per account
+        $dailyLimit = $user ? 5 : 3;
+        $newFileCount = count($files);
+
+        $start = now()->startOfDay();
+        $end = now()->endOfDay();
+        $usedToday = $user
+            ? (int) Upload::query()
+                ->where('user_id', $user->id)
+                ->whereBetween('created_at', [$start, $end])
+                ->sum('file_count')
+            : (int) Upload::query()
+                ->whereNull('user_id')
+                ->where('ip', $ip)
+                ->whereBetween('created_at', [$start, $end])
+                ->sum('file_count');
+
+        if ($usedToday + $newFileCount > $dailyLimit) {
+            return response()->json([
+                'error' => $user
+                    ? "Daily limit reached. Accounts can upload up to {$dailyLimit} file(s) per day."
+                    : "Daily limit reached. IPs can upload up to {$dailyLimit} file(s) per day.",
+                'limit' => $dailyLimit,
+                'used' => $usedToday,
+                'requested' => $newFileCount,
+            ], 429);
+        }
     
         // Validate each file
         $totalSize = 0;
         foreach ($files as $file) {
             if (!$file->isValid()) {
                 return response()->json(['error' => 'One or more files are invalid.'], 400);
-            }
-    
-            if (!in_array($file->getMimeType(), self::ALLOWED_MIME_TYPES)) {
-                return response()->json(['error' => 'File type not allowed: ' . $file->getClientOriginalName()], 400);
             }
     
             if ($file->getSize() > self::MAX_FILE_SIZE) {
@@ -88,51 +78,69 @@ class FileController extends Controller
             }
         }
     
-        // Create unique folder and zip file name
-        $folderName = Str::uuid();
-        $zipFileName = $folderName . '.zip';
-        $zipsDir = storage_path('app/public/zips');
+        // Create zip file (fast path: add directly from PHP upload temp files)
+        $zipFileName = (string) Str::uuid() . '.zip';
+        $zipsDir = storage_path('app/private/zips');
         $zipPath = "{$zipsDir}/{$zipFileName}";
-    
-        // Ensure the zips directory exists physically
-        if (!file_exists($zipsDir)) {
-            mkdir($zipsDir, 0777, true);
+
+        if (!is_dir($zipsDir) && !mkdir($zipsDir, 0777, true) && !is_dir($zipsDir)) {
+            Log::error("Failed to create zips directory: {$zipsDir}");
+            return response()->json(['error' => 'Server storage error.'], 500);
         }
-    
-        // Create zip file
+
         $zip = new ZipArchive();
         $result = $zip->open($zipPath, ZipArchive::CREATE | ZipArchive::OVERWRITE);
         if ($result !== TRUE) {
             Log::error("ZipArchive open failed: $result, Path: $zipPath");
             return response()->json(['error' => 'Failed to create zip file.'], 500);
         }
-    
-        // Process files in chunks
-        $chunkSize = 10;
-        $fileChunks = array_chunk($files, $chunkSize);
-    
-        $tempDir = storage_path("app/temp/{$folderName}");
-        if (!file_exists($tempDir)) {
-            mkdir($tempDir, 0777, true);
-        }
-    
-        foreach ($fileChunks as $chunk) {
-            foreach ($chunk as $file) {
-                $fileName = $this->sanitizeFilename($file->getClientOriginalName());
-                $file->move($tempDir, $fileName);
-                $zip->addFile("{$tempDir}/{$fileName}", $fileName);
+
+        $usedNames = [];
+        foreach ($files as $file) {
+            $original = $file->getClientOriginalName() ?: 'file';
+            $baseName = $this->sanitizeFilename($original);
+            $finalName = $baseName;
+
+            // Ensure unique names inside the zip
+            $i = 1;
+            while (isset($usedNames[$finalName])) {
+                $dot = strrpos($baseName, '.');
+                if ($dot === false) {
+                    $finalName = "{$baseName} ({$i})";
+                } else {
+                    $name = substr($baseName, 0, $dot);
+                    $ext = substr($baseName, $dot);
+                    $finalName = "{$name} ({$i}){$ext}";
+                }
+                $i++;
+            }
+            $usedNames[$finalName] = true;
+
+            $zip->addFile($file->getRealPath(), $finalName);
+
+            // Speed: store without compression (fastest). Swap to CM_DEFLATE if you want smaller zips.
+            if (method_exists($zip, 'setCompressionName')) {
+                $zip->setCompressionName($finalName, ZipArchive::CM_STORE);
             }
         }
-    
+
         $zip->close();
-    
-        // Now cleanup temp files
-        $this->deleteDirectory($tempDir);
-    
+
+        $expiresAt = now()->addDay();
+
+        Upload::create([
+            'user_id' => $user?->id,
+            'ip' => $ip,
+            'file_count' => $newFileCount,
+            'zip_name' => $zipFileName,
+            'zip_path' => $zipPath,
+            'expires_at' => $expiresAt,
+        ]);
+
         $downloadUrl = url("api/download/{$zipFileName}");
         return response()->json([
             'download_url' => $downloadUrl,
-            'expires_at' => now()->addHours(24)->toDateTimeString()
+            'expires_at' => $expiresAt->toDateTimeString(),
         ]);
     }
 
@@ -143,24 +151,29 @@ class FileController extends Controller
             return response()->json(['error' => 'Invalid file name.'], 400);
         }
 
-        $filePath = storage_path("app/public/zips/{$filename}");
-
-        if (!file_exists($filePath)) {
+        /** @var \App\Models\Upload|null $upload */
+        $upload = Upload::query()->where('zip_name', $filename)->first();
+        if (!$upload) {
             return response()->json(['error' => 'File not found.'], 404);
         }
 
-        // Stream the file for better memory usage
-        return response()->streamDownload(function () use ($filePath) {
-            $stream = fopen($filePath, 'rb');
-            fpassthru($stream);
-            fclose($stream);
-            
-            // Delete file after download
-            unlink($filePath);
-        }, $filename, [
-            'Content-Type' => 'application/zip',
-            'Content-Length' => filesize($filePath),
-        ]);
+        if ($upload->expires_at && now()->greaterThan($upload->expires_at)) {
+            if ($upload->zip_path && file_exists($upload->zip_path)) {
+                @unlink($upload->zip_path);
+            }
+            return response()->json(['error' => 'This download link has expired.'], 410);
+        }
+
+        $filePath = $upload->zip_path;
+        if (!$filePath || !file_exists($filePath)) {
+            return response()->json(['error' => 'File not found.'], 404);
+        }
+
+        $upload->forceFill(['downloaded_at' => now()])->save();
+
+        return response()
+            ->download($filePath, $filename, ['Content-Type' => 'application/zip'])
+            ->deleteFileAfterSend(true);
     }
 
     /**
@@ -176,23 +189,5 @@ class FileController extends Controller
         
         // Limit filename length
         return substr($filename, 0, 255);
-    }
-
-    /**
-     * Recursively delete a directory
-     */
-    private function deleteDirectory($dir)
-    {
-        if (!file_exists($dir)) {
-            return;
-        }
-
-        $files = array_diff(scandir($dir), ['.', '..']);
-        foreach ($files as $file) {
-            $path = "$dir/$file";
-            is_dir($path) ? $this->deleteDirectory($path) : unlink($path);
-        }
-        
-        rmdir($dir);
     }
 }

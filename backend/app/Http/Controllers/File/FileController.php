@@ -31,35 +31,42 @@ class FileController extends Controller
         $user = auth('sanctum')->user();
         $ip = $request->ip();
 
-        // Daily limits:
-        // - Guests: 3 files/day per IP
-        // - Signed in: 5 files/day per account
-        $dailyLimit = $user ? 5 : 3;
-        $newFileCount = count($files);
+        // Bypass IP/user-based daily restrictions for a specific signed-in account.
+        $bypassDailyRestrictions = $user && strtolower((string) $user->email) === 'arhamnatiq25@gmail.com';
 
-        $start = now()->startOfDay();
-        $end = now()->endOfDay();
-        $usedToday = $user
-            ? (int) Upload::query()
-                ->where('user_id', $user->id)
-                ->whereBetween('created_at', [$start, $end])
-                ->sum('file_count')
-            : (int) Upload::query()
-                ->whereNull('user_id')
-                ->where('ip', $ip)
-                ->whereBetween('created_at', [$start, $end])
-                ->sum('file_count');
+        if (!$bypassDailyRestrictions) {
+            // Daily limits:
+            // - Guests: 3 files/day per IP
+            // - Signed in: 5 files/day per account
+            $dailyLimit = $user ? 5 : 3;
+            $newFileCount = count($files);
 
-        if ($usedToday + $newFileCount > $dailyLimit) {
-            return response()->json([
-                'error' => $user
-                    ? "Daily limit reached. Accounts can upload up to {$dailyLimit} file(s) per day."
-                    : "Daily limit reached. IPs can upload up to {$dailyLimit} file(s) per day.",
-                'limit' => $dailyLimit,
-                'used' => $usedToday,
-                'requested' => $newFileCount,
-            ], 429);
+            $start = now()->startOfDay();
+            $end = now()->endOfDay();
+            $usedToday = $user
+                ? (int) Upload::query()
+                    ->where('user_id', $user->id)
+                    ->whereBetween('created_at', [$start, $end])
+                    ->sum('file_count')
+                : (int) Upload::query()
+                    ->whereNull('user_id')
+                    ->where('ip', $ip)
+                    ->whereBetween('created_at', [$start, $end])
+                    ->sum('file_count');
+
+            if ($usedToday + $newFileCount > $dailyLimit) {
+                return response()->json([
+                    'error' => $user
+                        ? "Daily limit reached. Accounts can upload up to {$dailyLimit} file(s) per day."
+                        : "Daily limit reached. IPs can upload up to {$dailyLimit} file(s) per day.",
+                    'limit' => $dailyLimit,
+                    'used' => $usedToday,
+                    'requested' => $newFileCount,
+                ], 429);
+            }
         }
+
+        $newFileCount = count($files);
     
         // Validate each file
         $totalSize = 0;

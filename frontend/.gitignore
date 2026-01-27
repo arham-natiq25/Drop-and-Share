@@ -18,6 +18,7 @@ jspm_packages/
 
 # Vite build output
 dist/
+dist.zip
 build/
 
 # Local env files

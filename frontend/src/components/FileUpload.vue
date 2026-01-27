@@ -52,7 +52,7 @@
               <button
                 type="button"
                 class="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-100 dark:hover:bg-slate-900"
-                @click="copyToClipboard(downloadUrl)"
+                @click="copyToClipboard(frontendDownloadUrl)"
               >
                 <ClipboardIcon class="h-4 w-4" />
                 Copy link
@@ -166,7 +166,7 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { RouterLink } from 'vue-router'
+import { RouterLink, useRouter } from 'vue-router'
 import {
   CheckCircleIcon,
   ClipboardIcon,
@@ -179,6 +179,8 @@ import {
 } from 'lucide-vue-next'
 import { alerts } from '../lib/alerts'
 import { http } from '../lib/http'
+
+const router = useRouter()
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100MB
 const MAX_TOTAL_SIZE = 500 * 1024 * 1024 // 500MB
@@ -193,6 +195,11 @@ const downloadUrl = ref('')
 const totalSize = computed(() => files.value.reduce((sum, f) => sum + f.size, 0))
 const canUpload = computed(() => files.value.length > 0 && !isUploading.value)
 const downloadFilename = computed(() => (downloadUrl.value ? downloadUrl.value.split('/').pop() : ''))
+const frontendDownloadUrl = computed(() => {
+  if (!downloadFilename.value) return ''
+  const route = router.resolve({ name: 'download', params: { filename: downloadFilename.value } })
+  return `${window.location.origin}${route.path}`
+})
 
 function fileKey(file) {
   return `${file.name}-${file.size}-${file.lastModified}`

@@ -47,29 +47,81 @@ It’s designed to provide a seamless and clean experience — perfect for quick
 
 ---
 
-##  Getting Started
+## Getting Started
 
-### ⚙️ Backend (Laravel)
+### Backend (Laravel 11, PHP 8.4)
 
 ```bash
-git clone https://github.com/arham-natiq25/DropNShare.git
-cd DropNShare/backend
+cd backend
 
 cp .env.example .env
 composer install
 php artisan key:generate
 
-# Set up DB credentials in .env
+# SQLite: create the file, then point DB_DATABASE at its absolute path in .env
+touch database/database.sqlite
 php artisan migrate
 php artisan storage:link
 
-php artisan serve
+php artisan serve          # http://localhost:8000
+```
+
+Set these in `backend/.env`:
+
+| Variable | What it does |
+|---|---|
+| `FRONTEND_URL` | Public URL of the SPA. Builds the shareable link and whitelists CORS. |
+| `UPLOAD_MAX_FILE_SIZE_MB` | Per-file cap (default 100). |
+| `UPLOAD_MAX_TOTAL_SIZE_MB` | Per-upload cap (default 500). |
+| `UPLOAD_MAX_FILES` | Files per upload (default 50). |
+| `SHARE_EXPIRY_HOURS` | How long a link lives (default 24). |
+
+These must stay at or below PHP's own `upload_max_filesize` / `post_max_size`.
+
+### Frontend (Vue 3 + Vite)
+
+```bash
+cd frontend
+
+cp .env.example .env       # set VITE_API_BASE_URL to your API, including /api
+npm install
+npm run dev                # http://localhost:5173
+```
+
+`npm run build` emits `frontend/dist`, using `.env.production`.
+
+### Expiring old shares
+
+Links stop working after `SHARE_EXPIRY_HOURS` and the archives are deleted by
+a scheduled command. In production add:
+
+```
+* * * * * cd /path/to/backend && php artisan schedule:run >> /dev/null 2>&1
+```
+
+Or clean up by hand: `php artisan shares:prune` (`--dry-run` to preview).
 
 ---
-### ⚙️ Frontend (Vue.js)
-``
-cd DropNShare/frontend
 
-npm install
-npm run dev
+## API
 
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/health` | Liveness check. |
+| `POST` | `/api/upload` | Multipart `files[]`. Returns `share_url`, `download_url`, `expires_at`. |
+| `GET` | `/api/share/{uuid}.zip` | Share metadata: file list, total size, expiry, download count. |
+| `GET` | `/api/download/{uuid}.zip` | Streams the zip. |
+
+Uploads are throttled to 20/min per IP, downloads to 60/min.
+
+Archives live in `backend/storage/app/private/zips` — outside the document
+root, so they can only be reached through the API, which enforces expiry and
+counts downloads.
+
+---
+
+## Deployment
+
+See [`deploy/README.md`](deploy/README.md) for the two-site nginx setup,
+upload limits, cron, and the SQLite → MySQL switch. `./deploy.sh` rebuilds
+everything after a `git pull`.

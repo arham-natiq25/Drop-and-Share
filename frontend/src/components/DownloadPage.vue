@@ -50,27 +50,81 @@
             Download Files
           </h1>
   
-          <p :class="[isDark ? 'text-gray-300' : 'text-gray-600', 'mb-8 text-xl']">
-            Your files have been zipped and are ready for download.
-          </p>
-  
-          <button @click="downloadFiles" :class="[
-            'px-8 py-4 text-lg text-white rounded-xl focus:outline-none focus:ring-2 focus:ring-opacity-50 transition-all duration-300 ease-in-out transform hover:scale-105 shadow-lg',
-            isDownloading ? 
-              (isDark ? 'bg-gray-600 cursor-not-allowed' : 'bg-gray-400 cursor-not-allowed') : 
-              'bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 focus:ring-purple-500'
-          ]" :disabled="isDownloading">
-            <div class="flex items-center justify-center">
-              <DownloadIcon v-if="!isDownloading" class="w-5 h-5 mr-2" />
-              <LoaderIcon v-else class="w-5 h-5 mr-2 animate-spin" />
-              <span>{{ isDownloading ? 'Downloading...' : 'Download Zip File' }}</span>
+          <!-- Loading the share's details -->
+          <div v-if="isLoading" class="flex items-center justify-center py-6">
+            <LoaderIcon :class="[isDark ? 'text-purple-400' : 'text-purple-600', 'w-6 h-6 mr-3 animate-spin']" />
+            <span :class="[isDark ? 'text-gray-300' : 'text-gray-600', 'text-lg']">Loading your files…</span>
+          </div>
+
+          <template v-else-if="share">
+            <p :class="[isDark ? 'text-gray-300' : 'text-gray-600', 'mb-2 text-xl']">
+              {{ share.file_count }} {{ share.file_count === 1 ? 'file' : 'files' }},
+              zipped and ready for download.
+            </p>
+
+            <p :class="[isDark ? 'text-gray-400' : 'text-gray-500', 'mb-8 text-sm']">
+              {{ share.total_size_human }}
+              <span v-if="expiresIn && expiresIn !== 'expired'"> · link expires in {{ expiresIn }}</span>
+            </p>
+
+            <!-- What is inside the archive -->
+            <ul v-if="share.files?.length" class="mb-8 space-y-2 text-left max-h-64 overflow-y-auto">
+              <li
+                v-for="(file, index) in share.files"
+                :key="index"
+                :class="[
+                  'flex items-center justify-between rounded-lg px-4 py-3',
+                  isDark ? 'bg-gray-700/70' : 'bg-gray-100/70'
+                ]"
+              >
+                <span :class="[isDark ? 'text-gray-200' : 'text-gray-700', 'font-medium truncate mr-4']">
+                  {{ file.name }}
+                </span>
+                <span :class="[isDark ? 'text-gray-400' : 'text-gray-500', 'text-sm whitespace-nowrap']">
+                  {{ file.size_human }}
+                </span>
+              </li>
+            </ul>
+
+            <button @click="downloadFiles" :class="[
+              'px-8 py-4 text-lg text-white rounded-xl focus:outline-none focus:ring-2 focus:ring-opacity-50 transition-all duration-300 ease-in-out transform hover:scale-105 shadow-lg',
+              isDownloading ?
+                (isDark ? 'bg-gray-600 cursor-not-allowed' : 'bg-gray-400 cursor-not-allowed') :
+                'bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 focus:ring-purple-500'
+            ]" :disabled="isDownloading">
+              <div class="flex items-center justify-center">
+                <DownloadIcon v-if="!isDownloading" class="w-5 h-5 mr-2" />
+                <LoaderIcon v-else class="w-5 h-5 mr-2 animate-spin" />
+                <span>
+                  {{ isDownloading
+                    ? (downloadProgress ? `Downloading… ${downloadProgress}%` : 'Downloading…')
+                    : 'Download Zip File' }}
+                </span>
+              </div>
+            </button>
+
+            <div v-if="isDownloading && downloadProgress" class="mt-6 max-w-md mx-auto">
+              <div :class="[isDark ? 'bg-gray-700' : 'bg-gray-200', 'w-full h-2 rounded-full overflow-hidden']">
+                <div
+                  class="h-full bg-gradient-to-r from-purple-600 to-blue-600 transition-all duration-200 ease-out"
+                  :style="{ width: downloadProgress + '%' }"
+                ></div>
+              </div>
             </div>
-          </button>
-  
+          </template>
+
           <div v-if="error" class="mt-8 text-red-500 text-lg p-4 rounded-lg" :class="isDark ? 'bg-red-900/20' : 'bg-red-100'">
             <AlertCircleIcon class="w-5 h-5 inline-block mr-2" />
             {{ error }}
           </div>
+
+          <router-link
+            v-if="!isLoading && !share"
+            to="/"
+            class="mt-8 inline-flex items-center px-6 py-3 rounded-xl text-white transition-all duration-300 transform hover:scale-105 shadow-lg bg-gradient-to-r from-purple-600 to-blue-600"
+          >
+            Share your own files
+          </router-link>
         </div>
       </div>
     </div>
@@ -112,7 +166,7 @@
 </template>
 
 <script>
-import { ref } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { 
   SendIcon, 
   BriefcaseIcon, 
@@ -127,7 +181,7 @@ import {
   LoaderIcon,
   AlertCircleIcon
 } from 'lucide-vue-next'
-import axios from 'axios'
+import api, { apiErrorMessage } from '../lib/api'
 
 export default {
   name: 'DownloadPage',
@@ -160,34 +214,103 @@ export default {
       isDark.value = !isDark.value
     }
 
-    const downloadFiles = async () => {
-      isDownloading.value = true
+    const isLoading = ref(true)
+    const share = ref(null)
+    const downloadProgress = ref(0)
+
+    const formatFileSize = (bytes) => {
+      if (!bytes) return '0 Bytes'
+      const k = 1024
+      const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB']
+      const i = Math.floor(Math.log(bytes) / Math.log(k))
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+    }
+
+    const expiresIn = computed(() => {
+      if (!share.value?.expires_at) return null
+      // The API sends UTC 'Y-m-d H:i:s'; make it a date the browser parses.
+      const expiry = new Date(share.value.expires_at.replace(' ', 'T') + 'Z')
+      const diffMs = expiry.getTime() - Date.now()
+      if (diffMs <= 0) return 'expired'
+      const hours = Math.floor(diffMs / 3600000)
+      const minutes = Math.floor((diffMs % 3600000) / 60000)
+      if (hours > 0) return `${hours}h ${minutes}m`
+      return `${minutes}m`
+    })
+
+    // Pull the share's details up front so the page can show what it holds
+    // and fail clearly when the link is dead.
+    const loadShare = async () => {
+      isLoading.value = true
       error.value = null
 
       try {
-        const baseUrl = 'https://dropnsharee.arhamnatiq.com/api';
-        const response = await axios.get(`${baseUrl}/download/${props.filename}`, {
-          responseType: 'blob'
+        const response = await api.get(`/share/${props.filename}`)
+        share.value = response.data
+      } catch (err) {
+        console.error('Error loading share:', err)
+        if (err?.response?.status === 410) {
+          error.value = 'This link has expired. Ask the sender for a new one.'
+        } else if (err?.response?.status === 404) {
+          error.value = 'This link no longer exists. It may have expired or been removed.'
+        } else {
+          error.value = apiErrorMessage(err, 'Could not load this share. Please try again.')
+        }
+      } finally {
+        isLoading.value = false
+      }
+    }
+
+    const downloadFiles = async () => {
+      isDownloading.value = true
+      downloadProgress.value = 0
+      error.value = null
+
+      try {
+        const response = await api.get(`/download/${props.filename}`, {
+          responseType: 'blob',
+          onDownloadProgress: (progressEvent) => {
+            if (!progressEvent.total) return
+            downloadProgress.value = Math.round(
+              (progressEvent.loaded * 100) / progressEvent.total
+            )
+          }
         })
-        const url = window.URL.createObjectURL(new Blob([response.data]))
+
+        const url = window.URL.createObjectURL(
+          new Blob([response.data], { type: 'application/zip' })
+        )
         const link = document.createElement('a')
         link.href = url
         link.setAttribute('download', props.filename)
         document.body.appendChild(link)
         link.click()
         link.remove()
+        window.URL.revokeObjectURL(url)
+
+        if (share.value) {
+          share.value.download_count = (share.value.download_count || 0) + 1
+        }
       } catch (err) {
         console.error('Error downloading file:', err)
-        error.value = 'An error occurred while downloading the file. Please try again.'
+        error.value = apiErrorMessage(err, 'An error occurred while downloading the file. Please try again.')
       } finally {
         isDownloading.value = false
+        downloadProgress.value = 0
       }
     }
+
+    onMounted(loadShare)
 
     return {
       isDark,
       isDownloading,
+      isLoading,
       error,
+      share,
+      expiresIn,
+      downloadProgress,
+      formatFileSize,
       toggleTheme,
       downloadFiles
     }

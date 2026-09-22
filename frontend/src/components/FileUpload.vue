@@ -118,6 +118,19 @@
             </ul>
           </div>
   
+          <div v-if="isUploading" class="mt-8">
+            <div class="flex justify-between mb-2">
+              <span :class="[isDark ? 'text-gray-300' : 'text-gray-600', 'text-sm font-medium']">Uploading…</span>
+              <span :class="[isDark ? 'text-gray-300' : 'text-gray-600', 'text-sm font-medium']">{{ uploadProgress }}%</span>
+            </div>
+            <div :class="[isDark ? 'bg-gray-700' : 'bg-gray-200', 'w-full h-2 rounded-full overflow-hidden']">
+              <div
+                class="h-full bg-gradient-to-r from-purple-600 to-blue-600 transition-all duration-200 ease-out"
+                :style="{ width: uploadProgress + '%' }"
+              ></div>
+            </div>
+          </div>
+
           <div class="mt-8 flex justify-end">
             <button 
               @click="uploadFiles" 
@@ -131,7 +144,7 @@
             >
               <UploadIcon v-if="!isUploading" class="w-5 h-5 mr-2" />
               <LoaderIcon v-else class="w-5 h-5 mr-2 animate-spin" />
-              {{ isUploading ? 'Uploading...' : 'Upload Files' }}
+              {{ isUploading ? `Uploading… ${uploadProgress}%` : 'Upload Files' }}
             </button>
           </div>
   
@@ -176,7 +189,7 @@
                     :class="isDark ? 'bg-gray-800 text-gray-200 hover:bg-gray-700' : 'bg-white text-gray-700 hover:bg-gray-50'"
                   >
                     <ClipboardIcon class="w-5 h-5 mr-2" />
-                    Copy Download URL
+                    Copy Share Link
                   </button>
                 </div>
               </div>
@@ -237,7 +250,7 @@ import {
   DownloadIcon,
   ClipboardIcon
 } from 'lucide-vue-next'
-import axios from 'axios'
+import api, { apiErrorMessage } from '../lib/api'
 import Swal from 'sweetalert2'
 
 export default {
@@ -298,6 +311,7 @@ const showError = (message) => {
     const isDragging = ref(false)
     const isUploading = ref(false)
     const downloadUrl = ref(null)
+    const uploadProgress = ref(0)
 
     const toggleTheme = () => {
       isDark.value = !isDark.value
@@ -407,21 +421,21 @@ const showError = (message) => {
   });
 
   try {
-    const baseUrl = 'https://dropnsharee.arhamnatiq.com/api';
-    const response = await axios.post(`${baseUrl}/upload`, formData, {
+    const response = await api.post('/upload', formData, {
       headers: {
         'Content-Type': 'multipart/form-data'
       },
       onUploadProgress: (progressEvent) => {
-        const percentCompleted = Math.round(
+        if (!progressEvent.total) return;
+        uploadProgress.value = Math.round(
           (progressEvent.loaded * 100) / progressEvent.total
         );
-        // You can add a progress bar here if you want
-        console.log(`Upload progress: ${percentCompleted}%`);
       }
     });
-    
-    downloadUrl.value = response.data.download_url;
+
+    // The link people actually share is the frontend download page, not the
+    // raw API endpoint.
+    downloadUrl.value = response.data.share_url || response.data.download_url;
 
     Swal.fire({
       title: 'Upload Complete!',
@@ -435,19 +449,10 @@ const showError = (message) => {
     files.value = [];
   } catch (error) {
     console.error('Error uploading files:', error);
-    
-    let errorMessage = 'There was an error uploading your files. Please try again.';
-    if (error.response) {
-      if (error.response.status === 413) {
-        errorMessage = 'Total file size exceeds server limit.';
-      } else if (error.response.data?.error) {
-        errorMessage = error.response.data.error;
-      }
-    }
-    
-    showError(errorMessage);
+    showError(apiErrorMessage(error, 'There was an error uploading your files. Please try again.'));
   } finally {
     isUploading.value = false;
+    uploadProgress.value = 0;
   }
 };
 
@@ -462,6 +467,7 @@ const showError = (message) => {
       isDragging,
       isUploading,
       downloadUrl,
+      uploadProgress,
       toggleTheme,
       handleDrop,
       handleFileInput,

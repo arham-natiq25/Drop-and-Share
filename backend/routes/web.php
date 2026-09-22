@@ -2,6 +2,5 @@
 
 use Illuminate\Support\Facades\Route;
 
-Route::get('/', function () {
-    return view('welcome');
-});
+// This host only serves the API; send anyone who lands on it to the app.
+Route::get('/', fn () => redirect()->away(config('dropnshare.frontend_url')));
